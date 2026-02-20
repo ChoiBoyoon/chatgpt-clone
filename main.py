@@ -3,6 +3,7 @@ dotenv.load_dotenv()
 
 from openai import OpenAI
 import asyncio
+import base64
 import streamlit as st
 from agents import Agent, Runner, SQLiteSession, WebSearchTool, FileSearchTool
 
@@ -16,7 +17,8 @@ if "agent" not in st.session_state:
         instructions="""
         You are a helpful assistant.
         You have access to the following tools:
-            -Web Search Tool: Use this when the user asks a question that isn't in your training data. Use this to learn about current events.
+            -Web Search Tool: Use this when the user asks a question that isn't in your training data. Use this tool when the user asks about current or future events, when you think you don't know the answer, try searching for it in the web first.
+            -File Search Tool: Use this tool when the user asks a question about facts related to themselves. Or when they ask questions about specific files.
         """,
         tools=[
             WebSearchTool(),
@@ -41,27 +43,40 @@ async def paint_history():
         if "role" in message:
             with st.chat_message(message["role"]):
                 if message["role"]=="user":
-                    st.write(message["content"])
+                    content = message["content"]
+                    if isinstance(content, str):
+                        st.write(content)
+                    elif isinstance(content, list):
+                        for part in content:
+                            if "image_url" in part:
+                                st.image(part["image_url"])
+                    # st.write(message["content"])
                 else:
                     if message["type"]=="message":
-                        st.write(message["content"][0]["text"])
-        if "type" in message and message["type"]=="web_search_call":
-            with st.chat_message("ai"):
-                st.write("🔍 Searched the web...") 
+                        st.write(message["content"][0]["text"].replace("$", "\$"))
+        if "type" in message:
+            if message["type"]=="web_search_call":
+                with st.chat_message("ai"):
+                    st.write("🔍 Searched the web...")
+            elif message["type"]=="file_search_call":
+                with st.chat_message("ai"):
+                    st.write("📁 Searched your files...")
+
+asyncio.run(paint_history())
 
 def update_status(status_container, event):
     status_messages={
-        "response.web_search_call.completed" : ("✅ Web search completed.", "complete"),
         "response.web_search_call.in_progress" : ("🔍 Starting web search...", "running"),
         "response.web_search_call.searching" : ("🔍 Web search in progress...", "running"),
+        "response.web_search_call.completed" : ("✅ Web search completed.", "complete"),
+        "response.file_search_call.in_progress" : ("📁 Starting file search...", "running"),
+        "response.file_search_call.searching" : ("📁 File search in progress...", "running"),
+        "response.file_search_call.completed" : ("✅ File search completed.", "complete"),
         "response.completed":("✅", "complete")
     }
     if event in status_messages:
         label, state = status_messages[event]
         status_container.update(label=label, state=state)
-
-
-asyncio.run(paint_history())
 
 async def run_agent(message):
     with st.chat_message("ai"):
@@ -80,12 +95,12 @@ async def run_agent(message):
 
                 if event.data.type=="response.output_text.delta":
                     response+=event.data.delta
-                    text_placeholder.write(response)
+                    text_placeholder.write(response.replace("$", "\$"))
 
 prompt = st.chat_input(
     "Write a message for your assistant", 
     accept_file=True,
-    file_type=["txt"])
+    file_type=["txt", "jpg", "jpeg", "png"])
 
 if prompt:
 
@@ -102,12 +117,29 @@ if prompt:
                         vector_store_id=VECTOR_STORE_ID,
                         file_id=uploaded_file.id
                     )
-                    status.update(label="✅ File uploaded", status="complete")
+                    status.update(label="✅ File uploaded", state="complete")
+        elif file.type.startswith("image/"):
+            with st.status("⏳ Uploading image...") as status:
+                file_bytes=file.getvalue()
+                base64_data = base64.b64encode(file_bytes).decode("utf-8")
+                data_uri = f"data:{file.type};base64, {base64_data}"
+                asyncio.run(session.add_items([{
+                    "role":"user", 
+                    "content":[{
+                        "type":"input_image",
+                        "detail":"auto",
+                        "image_url":data_uri
+                    }]
+                }]))
+                status.update(label="✅ Image uploaded", state="complete")
+            with st.chat_message("human"):
+                st.image(data_uri)
+
 
     if prompt.text:
         with st.chat_message("human"):
-            st.write(prompt)
-        asyncio.run(run_agent(prompt))
+            st.write(prompt.text)
+        asyncio.run(run_agent(prompt.text))
 
 
 
